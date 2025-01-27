@@ -6,11 +6,15 @@ package frc.robot.subsystems;
 
 import edu.wpi.first.hal.FRCNetComm.tInstances;
 import edu.wpi.first.hal.FRCNetComm.tResourceType;
+
+
+import com.ctre.phoenix.Logger;
 import com.ctre.phoenix6.hardware.Pigeon2;
 import com.pathplanner.lib.auto.AutoBuilder;
 import com.pathplanner.lib.config.PIDConstants;
 import com.pathplanner.lib.config.RobotConfig;
 import com.pathplanner.lib.controllers.PPHolonomicDriveController;
+import com.pathplanner.lib.util.PathPlannerLogging;
 
 import choreo.auto.AutoFactory;
 import choreo.trajectory.SwerveSample;
@@ -26,7 +30,12 @@ import edu.wpi.first.math.kinematics.SwerveModuleState;
 import edu.wpi.first.wpilibj.DriverStation;
 import edu.wpi.first.wpilibj.smartdashboard.SmartDashboard;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import frc.robot.Constants;
 import frc.robot.Constants.DriveConstants;
+
+
+
+import com.pathplanner.lib.commands.PathPlannerAuto;
 
 public class DriveSubsystem extends SubsystemBase {
   // Create MAXSwerveModules
@@ -52,9 +61,6 @@ public class DriveSubsystem extends SubsystemBase {
 
   // The gyro sensor
   private final Pigeon2 m_pigeon = new Pigeon2(DriveConstants.kGyroCanId, DriveConstants.kCanBus);
-  private final PIDController xController = new PIDController(10.0, 0.0, 0.0);
-  private final PIDController yController = new PIDController(10.0, 0.0, 0.0);
-  private final PIDController headingController = new PIDController(7.5, 0.0, 0.0);
 
 
   // Odometry class for tracking robot pose
@@ -69,13 +75,36 @@ public class DriveSubsystem extends SubsystemBase {
       });
 
 
-  
-    
+
+
+  private ChassisSpeeds getRobotRelativeSpeeds() {
+      return DriveConstants.kDriveKinematics.toChassisSpeeds(getModuleStates());
+    }
+
+  private SwerveModuleState[] getModuleStates() {
+    return new SwerveModuleState[] {
+              m_frontLeft.getState(),
+              m_frontRight.getState(),
+              m_rearLeft.getState(),
+              m_rearRight.getState()
+    };
+  }
+
+  private void driveRobotRelative(ChassisSpeeds speeds) {
+    drive(speeds, false);
+  }
+
   
 
 
-
-  
+  private void drive(ChassisSpeeds speeds, boolean fieldRelative) {
+    if (fieldRelative)
+        speeds = ChassisSpeeds.fromFieldRelativeSpeeds(speeds, getPose().getRotation());
+    speeds = ChassisSpeeds.discretize(speeds, 0); //Delta Seconds???????
+    var swerveModuleStates = DriveConstants.kDriveKinematics.toSwerveModuleStates(speeds);
+    SwerveDriveKinematics.desaturateWheelSpeeds(swerveModuleStates, DriveConstants.kMaxSpeedMetersPerSecond);
+    setModuleStates(swerveModuleStates);
+}
 
 
 
@@ -85,32 +114,50 @@ public class DriveSubsystem extends SubsystemBase {
     // Usage reporting for MAXSwerve template
     HAL.report(tResourceType.kResourceType_RobotDrive, tInstances.kRobotDriveSwerve_MaxSwerve);
 
-    RobotConfig config;
-    try{
-      config = RobotConfig.fromGUISettings();
-    } catch (Exception e){
-      e.printStackTrace();
-    }
-    
-  AutoBuilder.configure(
-    this::getPose, // A function that returns the current robot pose
-    this::resetOdometry, // A function that resets the current robot pose to the provided Pose2d
-    this::followTrajectory, // The drive subsystem trajectory follower 
-    true, // If alliance flipping should be enabled 
-    this, // The drive subsystem  
-    );
-  }
 
-  public void followTrajectory(SwerveSample sample) {
-        // Get the current pose of the robot
-        Pose2d pose = getPose();
+    AutoBuilder.configure(
+                this::getPose, 
+                this::resetOdometry, 
+                this::getRobotRelativeSpeeds,
+                this::driveRobotRelative,
+                new HolonomicPathFollowerConfig( // HolonomicPathFollowerConfig, this should likely live in your
+                                                 // Constants class
+                        new PIDConstants(5.0, 0.0, 0.0), // Translation PID constants
+                        new PIDConstants(5.0, 0.0, 0.0), // Rotation PID constants
+                        Constants.DriveConstants.kMaxSpeedMetersPerSecond, // Max module speed, in m/s
+                        0.4, // Drive base radius in meters. Distance from robot center to furthest module.
+                        new ReplanningConfig() // Default path replanning config. See the API for the options here
+                ),
+                () -> {
+                    // Boolean supplier that controls when the path will be mirrored for the red
+                    // alliance
+                    // This will flip the path being followed to the red side of the field.
+                    // THE ORIGIN WILL REMAIN ON THE BLUE SIDE
 
-        // Generate the next speeds for the robot
-        ChassisSpeeds speeds = new ChassisSpeeds(
-            sample.vx + xController.calculate(pose.getX(), sample.x),
-            sample.vy + yController.calculate(pose.getY(), sample.y),
-            sample.omega + headingController.calculate(pose.getRotation().getRadians(), sample.heading)
+                    var alliance = DriverStation.getAlliance();
+                    if (alliance.isPresent()) {
+                        return alliance.get() == DriverStation.Alliance.Red;
+                    }
+                    return false;
+                },
+                this // Reference to this subsystem to set requirements
         );
+        PathPlannerLogging.setLogCurrentPoseCallback(pose -> Logger.recordOutput("Chassis/targetPose",pose));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
   }
 
   @Override
